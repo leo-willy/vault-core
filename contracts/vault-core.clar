@@ -168,3 +168,89 @@
         (ok (map-set oracle-operators operator authorized))
     )
 )
+
+(define-public (update-price
+        (asset (string-ascii 10))
+        (price uint)
+        (confidence uint)
+    )
+    (begin
+        (asserts! (default-to false (map-get? oracle-operators tx-sender))
+            ERR-NOT-AUTHORIZED
+        )
+        (asserts! (> price u0) ERR-INVALID-AMOUNT)
+        (asserts! (and (>= confidence u1) (<= confidence u100))
+            ERR-INVALID-AMOUNT
+        )
+        (asserts! (> (len asset) u0) ERR-INVALID-AMOUNT)
+        (ok (map-set price-feeds { asset: asset } {
+            price: price,
+            timestamp: stacks-block-height,
+            confidence: confidence,
+        }))
+    )
+)
+
+(define-read-only (get-price (asset (string-ascii 10)))
+    (let ((price-data (map-get? price-feeds { asset: asset })))
+        (match price-data
+            feed (if (< (- stacks-block-height (get timestamp feed)) MAX-PRICE-AGE)
+                (ok (get price feed))
+                ERR-ORACLE-PRICE-STALE
+            )
+            ERR-ORACLE-PRICE-STALE
+        )
+    )
+)
+
+;; VAULT CREATION & MANAGEMENT
+
+(define-public (create-vault
+        (stx-amount uint)
+        (xbtc-amount uint)
+    )
+    (let (
+            (vault-id (+ (var-get total-vaults) u1))
+            (stx-price (unwrap! (get-price "STX") ERR-ORACLE-PRICE-STALE))
+            (xbtc-price (unwrap! (get-price "xBTC") ERR-ORACLE-PRICE-STALE))
+            (total-collateral-value (+ (* stx-amount stx-price) (* xbtc-amount xbtc-price)))
+            (user-vaults-list (default-to (list)
+                (get vault-ids (map-get? user-vaults { user: tx-sender }))
+            ))
+        )
+        (asserts! (> stx-amount u0) ERR-INVALID-AMOUNT)
+        (asserts! (>= xbtc-amount u0) ERR-INVALID-AMOUNT)
+        (asserts! (< vault-id u1000000) ERR-INVALID-AMOUNT)
+        (asserts! (is-none (map-get? vaults { vault-id: vault-id }))
+            ERR-VAULT-ALREADY-EXISTS
+        )
+
+        ;; Transfer collateral to contract
+        (try! (stx-transfer? stx-amount tx-sender (as-contract tx-sender)))
+
+        ;; Create vault
+        (map-set vaults { vault-id: vault-id } {
+            owner: tx-sender,
+            stx-collateral: stx-amount,
+            xbtc-collateral: xbtc-amount,
+            debt: u0,
+            last-update: stacks-block-height,
+            is-active: true,
+        })
+
+        ;; Update user vault list
+        (map-set user-vaults { user: tx-sender } { vault-ids: (unwrap! (as-max-len? (append user-vaults-list vault-id) u10)
+            ERR-INVALID-AMOUNT
+        ) })
+
+        ;; Update protocol statistics
+        (var-set total-vaults vault-id)
+        (var-set total-stx-collateral
+            (+ (var-get total-stx-collateral) stx-amount)
+        )
+        (var-set total-xbtc-collateral
+            (+ (var-get total-xbtc-collateral) xbtc-amount)
+        )
+        (ok vault-id)
+    )
+)
